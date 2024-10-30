@@ -256,27 +256,32 @@ public class LevelsManagerTest {
      */
     @Test
     public void testCalculateLevel() {
-	Results results = new Results();
-	results.setLevel(10000);
-	results.setInitialLevel(3);
-	lm.calculateLevel(uuid, island);
-	// Complete the pipelined completable future
-	cf.complete(results);
+        Results results = new Results();
+        results.setLevel(10000);
+        results.setInitialLevel(3);
+        lm.calculateLevel(uuid, island);
 
-	assertEquals(10000L, lm.getLevelsData(island).getLevel());
-	// Map<UUID, Long> tt = lm.getTopTen(world, 10);
-	// assertEquals(1, tt.size());
-	// assertTrue(tt.get(uuid) == 10000);
-	assertEquals(10000L, lm.getIslandMaxLevel(world, uuid));
+        // Complete the pipelined completable future
+        cf.thenRun(() -> {
+            assertEquals(10000L, lm.getLevelsData(island).getLevel());
+            assertEquals(10000L, lm.getIslandMaxLevel(world, uuid));
+        });
+        cf.complete(results);
 
-	results.setLevel(5000);
-	lm.calculateLevel(uuid, island);
-	// Complete the pipelined completable future
-	cf.complete(results);
-	assertEquals(5000L, lm.getLevelsData(island).getLevel());
-	// Still should be 10000
-	assertEquals(10000L, lm.getIslandMaxLevel(world, uuid));
+        // Map<UUID, Long> tt = lm.getTopTen(world, 10);
+        // assertEquals(1, tt.size());
+        // assertTrue(tt.get(uuid) == 10000);
 
+        results.setLevel(5000);
+        lm.calculateLevel(uuid, island);
+
+        // Complete the pipelined completable future
+        cf.thenRun(() -> {
+            assertEquals(5000L, lm.getLevelsData(island).getLevel());
+            // Still should be 10000
+            assertEquals(10000L, lm.getIslandMaxLevel(world, uuid));
+        });
+        cf.complete(results);
     }
 
     /**

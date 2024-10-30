@@ -69,6 +69,8 @@ public class IslandLevelCalculator {
     private final Island island;
     private final Map<Material, Integer> limitCount;
     private final CompletableFuture<Results> r;
+    private final Queue<Pair<Material, Boolean>> blockCheckQueue = new ConcurrentLinkedQueue<>();
+    private final CompletableFuture<Void> queueProcessingComplete = new CompletableFuture<>();
 
     private final Results results;
     private long duration;
@@ -307,23 +309,29 @@ public class IslandLevelCalculator {
         Util.getChunkAtAsync(world, p.x, p.z, world.getEnvironment().equals(Environment.NETHER)).thenAccept(chunk -> {
             if (chunk != null) {
                 chunkList.add(chunk);
-                roseStackerCheck(chunk);
+                roseStackerCheck(chunk).thenRun(() -> {
+                    loadChunks(r2, world, pairList, chunkList);
+                });
+                return;
             }
             loadChunks(r2, world, pairList, chunkList); // Iteration
         });
     }
 
-    private void roseStackerCheck(Chunk chunk) {
+    private CompletableFuture<Void> roseStackerCheck(Chunk chunk) {
         if (addon.isRoseStackersEnabled()) {
-            RoseStackerAPI.getInstance().getStackedBlocks(Collections.singletonList(chunk)).forEach(e -> {
-                // Blocks below sea level can be scored differently
-                boolean belowSeaLevel = seaHeight > 0 && e.getLocation().getY() <= seaHeight;
-                // Check block once because the base block will be counted in the chunk snapshot
-                for (int _x = 0; _x < e.getStackSize() - 1; _x++) {
-                    checkBlock(e.getBlock().getType(), belowSeaLevel);
-                }
+            return CompletableFuture.runAsync(() -> {
+                RoseStackerAPI.getInstance().getStackedBlocks(Collections.singletonList(chunk)).forEach(e -> {
+                    // Blocks below sea level can be scored differently
+                    boolean belowSeaLevel = seaHeight > 0 && e.getLocation().getY() <= seaHeight;
+                    // Check block once because the base block will be counted in the chunk snapshot
+                    for (int _x = 0; _x < e.getStackSize() - 1; _x++) {
+                        checkBlock(e.getBlock().getType(), belowSeaLevel);
+                    }
+                });
             });
         }
+        return CompletableFuture.completedFuture(null);
     }
 
     /**
@@ -640,20 +648,35 @@ public class IslandLevelCalculator {
                     StackedBarrel barrel = WildStackerAPI.getStackedBarrel(stackedBlock);
                     int barrelAmt = WildStackerAPI.getBarrelAmount(stackedBlock);
                     for (int _x = 0; _x < barrelAmt; _x++) {
-                        checkBlock(barrel.getType(), belowSeaLevel);
+                        queueCheckBlock(barrel.getType(), belowSeaLevel);
                     }
                 } else if (WildStackerAPI.getWildStacker().getSystemManager().isStackedSpawner(stackedBlock)) {
                     int spawnerAmt = WildStackerAPI.getSpawnersAmount((CreatureSpawner) stackedBlock.getState());
                     for (int _x = 0; _x < spawnerAmt; _x++) {
-                        checkBlock(stackedBlock.getType(), belowSeaLevel);
+                        queueCheckBlock(stackedBlock.getType(), belowSeaLevel);
                     }
                 }
             });
             futures.add(future);
         }
         // Return a CompletableFuture that completes when all futures are done
-        return CompletableFuture.allOf(futures.toArray(new CompletableFuture[0]));
+        return CompletableFuture.allOf(futures.toArray(new CompletableFuture[0]))
+                .thenCompose(f -> startQueueProcessing())
+                .thenCompose(f -> queueProcessingComplete);
 
+    }
+
+    private void queueCheckBlock(Material mat, boolean belowSeaLevel) {
+        blockCheckQueue.add(new Pair<>(mat, belowSeaLevel));
+    }
+
+    private CompletableFuture<Void> startQueueProcessing() {
+        return CompletableFuture.runAsync(() -> {
+            Pair<Material, Boolean> entry;
+            while ((entry = blockCheckQueue.poll()) != null) {
+                checkBlock(entry.getKey(), entry.getValue());
+            }
+        }).thenRun(() -> queueProcessingComplete.complete(null)); // Mark queue completion
     }
 
 }

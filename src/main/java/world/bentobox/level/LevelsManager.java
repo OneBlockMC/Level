@@ -14,6 +14,9 @@ import java.util.TreeMap;
 import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
 import java.util.stream.Collectors;
 import java.util.stream.Stream;
 
@@ -101,7 +104,7 @@ public class LevelsManager {
 
     /**
      * Add an island to a top ten
-     * 
+     *
      * @param island - island to add
      * @param lv     - level
      * @return true if successful, false if not added
@@ -119,7 +122,7 @@ public class LevelsManager {
     /**
      * Calculate the island level, set all island member's levels to the result and
      * try to add the owner to the top ten
-     * 
+     *
      * @param targetPlayer - uuid of targeted player - owner or team member
      * @param island       - island to calculate
      * @return completable future with the results of the calculation
@@ -136,45 +139,69 @@ public class LevelsManager {
         addon.getPipeliner().addIsland(island).thenAccept(r -> {
             // Results are irrelevant because the island is unowned or deleted, or
             // IslandLevelCalcEvent is cancelled
-            if (r == null || fireIslandLevelCalcEvent(targetPlayer, island, r)) {
+            if (r == null) {
                 result.complete(null);
+                return;
             }
-            // Save result
-            setIslandResults(island, r);
-            // Save the island scan details
-            result.complete(r);
+
+            // Wait for island level calculation event
+            fireIslandLevelCalcEvent(targetPlayer, island, r)
+                    .thenAccept(cancelled -> {
+                        // Check if event is cancelled or not
+                        if (cancelled) {
+                            result.complete(null);
+                        } else {
+                            // Save result
+                            setIslandResults(island, r);
+                            // Save the island scan details
+                            result.complete(r);
+                        }
+                    });
         });
         return result;
     }
 
     /**
      * Fires the IslandLevelCalculatedEvent and returns true if it is canceled
-     * 
+     *
      * @param targetPlayer - target player
      * @param island       - island
      * @param results      - results set
      * @return true if canceled
      */
-    private boolean fireIslandLevelCalcEvent(UUID targetPlayer, Island island, Results results) {
-        // Fire post calculation event
-        IslandLevelCalculatedEvent ilce = new IslandLevelCalculatedEvent(targetPlayer, island, results);
-        Bukkit.getPluginManager().callEvent(ilce);
-        if (ilce.isCancelled())
-            return true;
-        // Set the values if they were altered
-        results.setLevel((Long) ilce.getKeyValues().getOrDefault("level", results.getLevel()));
-        results.setInitialLevel((Long) ilce.getKeyValues().getOrDefault("initialLevel", results.getInitialLevel()));
-        results.setDeathHandicap((int) ilce.getKeyValues().getOrDefault("deathHandicap", results.getDeathHandicap()));
-        results.setPointsToNextLevel(
-                (Long) ilce.getKeyValues().getOrDefault("pointsToNextLevel", results.getPointsToNextLevel()));
-        results.setTotalPoints((Long) ilce.getKeyValues().getOrDefault("totalPoints", results.getTotalPoints()));
-        return ((Boolean) ilce.getKeyValues().getOrDefault("isCancelled", false));
+    private CompletableFuture<Boolean> fireIslandLevelCalcEvent(UUID targetPlayer, Island island, Results results) {
+        return CompletableFuture.supplyAsync(() ->
+                new IslandLevelCalculatedEvent(targetPlayer, island, results)
+        ).thenCompose(ilce -> {
+            CompletableFuture<IslandLevelCalculatedEvent> future = new CompletableFuture<>();
+
+            // For callEvent method silently fails a lot with the changes I've made, this is the only way
+            // to get it to work consistently and reliably.
+            Bukkit.getScheduler().runTask(addon.getPlugin(), () -> {
+                Bukkit.getPluginManager().callEvent(ilce);
+                future.complete(ilce);
+            });
+
+            return future;
+        }).thenApply(ilce -> {
+            if (ilce.isCancelled())
+                return true;
+            // Set the values if they were altered
+            Map<String, Object> keyValues = ilce.getKeyValues();
+            results.setLevel((Long) keyValues.getOrDefault("level", results.getLevel()));
+            results.setInitialLevel((Long) keyValues.getOrDefault("initialLevel", results.getInitialLevel()));
+            results.setDeathHandicap((int) keyValues.getOrDefault("deathHandicap", results.getDeathHandicap()));
+            results.setPointsToNextLevel(
+                    (Long) keyValues.getOrDefault("pointsToNextLevel", results.getPointsToNextLevel()));
+            results.setTotalPoints((Long) keyValues.getOrDefault("totalPoints", results.getTotalPoints()));
+            return ((Boolean) keyValues.getOrDefault("isCancelled", false));
+        });
     }
 
     /**
      * Get the string representation of the level. May be converted to shorthand
      * notation, e.g., 104556 = 10.5k
-     * 
+     *
      * @param lvl - long value to represent
      * @return string of the level.
      */
@@ -202,7 +229,7 @@ public class LevelsManager {
 
     /**
      * Get the initial level of the island. Used to zero island levels
-     * 
+     *
      * @param island - island
      * @return initial level of island
      */
@@ -212,12 +239,12 @@ public class LevelsManager {
 
     /**
      * Get level of island from cache for a player.
-     * 
+     *
      * @param world        - world where the island is
      * @param targetPlayer - target player UUID
      * @param ownerOnly    - return level only if the target player is the owner
      * @return Level of the player's island or zero if player is unknown or UUID is
-     *         null
+     * null
      */
     public long getIslandLevel(@NonNull World world, @Nullable UUID targetPlayer) {
         return getIslandLevel(world, targetPlayer, false);
@@ -225,12 +252,12 @@ public class LevelsManager {
 
     /**
      * Get level of island from cache for a player.
-     * 
+     *
      * @param world        - world where the island is
      * @param targetPlayer - target player UUID
      * @param ownerOnly    - return level only if the target player is the owner
      * @return Level of the player's island or zero if player is unknown or UUID is
-     *         null
+     * null
      */
     public long getIslandLevel(@NonNull World world, @Nullable UUID targetPlayer, boolean ownerOnly) {
         if (targetPlayer == null)
@@ -245,11 +272,11 @@ public class LevelsManager {
 
     /**
      * Get the maximum level ever given to this island
-     * 
+     *
      * @param world        - world where the island is
      * @param targetPlayer - target player UUID
      * @return Max level of the player's island or zero if player is unknown or UUID
-     *         is null
+     * is null
      */
     public long getIslandMaxLevel(@NonNull World world, @Nullable UUID targetPlayer) {
         if (targetPlayer == null)
@@ -261,11 +288,11 @@ public class LevelsManager {
 
     /**
      * Returns a formatted string of the target player's island level
-     * 
+     *
      * @param world        - world where the island is
      * @param targetPlayer - target player's UUID
      * @return Formatted level of player or zero if player is unknown or UUID is
-     *         null
+     * null
      */
     public String getIslandLevelString(@NonNull World world, @Nullable UUID targetPlayer) {
         return formatLevel(getIslandLevel(world, targetPlayer));
@@ -273,7 +300,7 @@ public class LevelsManager {
 
     /**
      * Load a level data for the island from the cache or database.
-     * 
+     *
      * @param island - UUID of island
      * @return IslandLevels object
      */
@@ -302,7 +329,7 @@ public class LevelsManager {
     /**
      * Get the number of points required until the next level since the last level
      * calc
-     * 
+     *
      * @param world        - world where the island is
      * @param targetPlayer - target player UUID
      * @return string with the number required or blank if the player is unknown
@@ -317,7 +344,7 @@ public class LevelsManager {
     /**
      * Get the weighted top ten for this world. Weighting is based on number of
      * players per team.
-     * 
+     *
      * @param world - world requested
      * @param size  - size of the top ten
      * @return sorted top ten map. The key is the island unique ID
@@ -350,7 +377,7 @@ public class LevelsManager {
     /**
      * Get the top ten for this world. Returns offline players or players with the
      * intopten permission.
-     * 
+     *
      * @param world - world requested
      * @param size  - size of the top ten
      * @return sorted top ten map. The key is the island unique ID
@@ -393,7 +420,7 @@ public class LevelsManager {
 
     /**
      * Get the rank of the player in the rankings
-     * 
+     *
      * @param world - world
      * @param uuid  - player UUID
      * @return rank placing - note - placing of 1 means top ranked
@@ -410,7 +437,7 @@ public class LevelsManager {
 
     /**
      * Checks if player has the correct top ten perm to have their level saved
-     * 
+     *
      * @param world
      * @param targetPlayer
      * @return true if player has the perm or the player is offline
@@ -441,7 +468,7 @@ public class LevelsManager {
 
     /**
      * Removes an island from a world's top ten
-     * 
+     *
      * @param world - world
      * @param uuid  - the island's uuid
      */
@@ -455,7 +482,7 @@ public class LevelsManager {
 
     /**
      * Set an initial island level
-     * 
+     *
      * @param island - the island to set. Must have a non-null world
      * @param lv     - initial island level
      */
@@ -469,7 +496,7 @@ public class LevelsManager {
     /**
      * Set the island level for the owner of the island that targetPlayer is a
      * member
-     * 
+     *
      * @param world  - world
      * @param island - island
      * @param lv     - level
@@ -495,7 +522,7 @@ public class LevelsManager {
     /**
      * Set the island level for the owner of the island that targetPlayer is a
      * member
-     * 
+     *
      * @param world - world
      * @param owner - owner of the island
      * @param r     - results of the calculation
@@ -517,7 +544,7 @@ public class LevelsManager {
 
     /**
      * Removes island from cache when it is deleted
-     * 
+     *
      * @param uniqueId - id of island
      */
     public void deleteIsland(String uniqueId) {
