@@ -175,7 +175,7 @@ public class LevelsManager {
         ).thenCompose(ilce -> {
             CompletableFuture<IslandLevelCalculatedEvent> future = new CompletableFuture<>();
 
-            // For callEvent method silently fails a lot with the changes I've made, this is the only way
+            // For some reason, the callEvent method silently fails a lot with the changes I've made, this is the only way
             // to get it to work consistently and reliably.
             Bukkit.getScheduler().runTask(addon.getPlugin(), () -> {
                 Bukkit.getPluginManager().callEvent(ilce);
